@@ -46,8 +46,8 @@ If a field is not applicable based on the mode, provide an empty string or empty
 
 def analyze_input(image, text):
     try:
-        # Reverting back to gemini-2.0-flash as the API recognized it previously.
-        model = genai.GenerativeModel('gemini-2.0-flash', 
+        # Use the modern gemini-2.5-flash model as required by the API
+        model = genai.GenerativeModel('gemini-2.5-flash', 
                                       system_instruction=SYSTEM_PROMPT,
                                       generation_config={"response_mime_type": "application/json"})
         
