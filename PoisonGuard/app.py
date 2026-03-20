@@ -11,10 +11,22 @@ from PIL import Image
 from dotenv import load_dotenv
 
 # ==========================================
-# 1. SETUP & CONFIGURATION
+# 1. SETUP & CONFIGURATION (MULTI-GCP SERVICES)
 # ==========================================
+# Initialize standard Python logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# [NEW GCP SERVICE] Integrate Google Cloud Logging natively if deployed on Cloud Run
+try:
+    import google.cloud.logging
+    # Instantiate the GCP logging client
+    client = google.cloud.logging.Client()
+    # Connects the logger to the Cloud Logging handlers
+    client.setup_logging()
+    logger.info("Successfully natively integrated with Google Cloud Logging Operations Suite.")
+except Exception as e:
+    logger.info("Running locally or without GCP credentials; using standard console logs.")
 
 load_dotenv()
 
