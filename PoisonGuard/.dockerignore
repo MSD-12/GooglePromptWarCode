@@ -4,7 +4,7 @@ __pycache__/
 *.pyo
 .env
 .DS_Store
-app.py
-requirements.txt
-*.md
+mcp_client_config.md
+mcp_server.py
+requirements-mcp.txt
 deploy.sh
