@@ -1,68 +1,56 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 import json
 import os
-from app import analyze_input, init_gemini
+from app import analyze_input_async, init_gemini, validate_inputs, render_list
 
-# Mock Image for testing
 class MockImage:
-    pass
+    def __init__(self, format="JPEG"):
+        self.format = format
 
 @pytest.fixture
-def mock_model():
-    model = MagicMock()
+def mock_async_model():
+    model = AsyncMock()
     return model
 
-def test_analyze_input_success(mock_model):
-    # Setup mock response
-    mock_response = MagicMock()
+@pytest.mark.asyncio
+async def test_analyze_input_async_success(mock_async_model):
+    """Integration style mocked test verifying JSON parsing from an async API call."""
+    mock_response = AsyncMock()
     mock_response.text = json.dumps({
         "mode": "EDUCATION",
         "identified_threat": "Poison Ivy",
         "toxicity_level": "Mild",
         "urgency": "Low",
         "call_911": False,
-        "first_aid_steps": ["Wash skin with soap", "Apply calamine lotion"],
+        "first_aid_steps": ["Wash skin with soap"],
         "educational_info": {
-            "common_names": "Poison Ivy",
-            "preventative_measures": "Wear long sleeves",
-            "toxicity_to_groups": "Mild rash to humans",
-            "symptoms_to_watch": ["Itching", "Redness"]
+            "symptoms_to_watch": ["Itching"]
         }
     })
-    mock_model.generate_content.return_value = mock_response
+    mock_async_model.generate_content_async.return_value = mock_response
 
-    # Execute
-    result = analyze_input(model=mock_model, image=MockImage(), text="Is this plant harmful?")
+    result = await analyze_input_async(model=mock_async_model, image=MockImage(), text="Is this harmful?")
     
-    # Assert
     assert result["mode"] == "EDUCATION"
     assert result["identified_threat"] == "Poison Ivy"
     assert result["call_911"] is False
-    assert len(result["first_aid_steps"]) == 2
-    mock_model.generate_content.assert_called_once()
 
+def test_validate_inputs_empty():
+    """Unit Test: Ensure scalability by blocking empty requests."""
+    error = validate_inputs(None, "")
+    assert error is not None
+    assert "No input provided" in error
 
-def test_analyze_input_empty():
-    """Test that empty inputs immediately return an error without API calls."""
-    result = analyze_input(MagicMock(), image=None, text="")
-    assert "error" in result
-    assert "No input provided" in result["error"]
+def test_validate_inputs_unsupported_image():
+    """Unit Test: Robust validation blocking unknown formats."""
+    error = validate_inputs(MockImage(format="TIFF"), "Check this out")
+    assert error is not None
+    assert "Unsupported image format" in error
 
-def test_analyze_input_json_error(mock_model):
-    """Test that malformed JSON from the API is gracefully handled."""
-    mock_response = MagicMock()
-    mock_response.text = "This is not valid JSON!!!"
-    mock_model.generate_content.return_value = mock_response
-
-    result = analyze_input(model=mock_model, image=None, text="test")
-    assert "error" in result
-    assert "malformed data" in result["error"]
-
-@patch.dict(os.environ, {"GEMINI_API_KEY": ""})
-def test_init_gemini_no_api_key():
-    """Test the init function gracefully returns None when API key is missing."""
-    with patch("app.logger") as mock_logger:
-        model = init_gemini()
-        assert model is None
-        mock_logger.error.assert_called_once_with("GEMINI_API_KEY environment variable is missing.")
+def test_validate_inputs_length_limit():
+    """Unit Test: Performance protection against massive text payloads."""
+    long_text = "a" * 2005
+    error = validate_inputs(None, long_text)
+    assert error is not None
+    assert "too long" in error

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from typing import Optional, Dict, Any
 
 import streamlit as st
@@ -12,14 +13,11 @@ from dotenv import load_dotenv
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
-# Configure logging for better observability and security tracking
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Load environment variables securely
 load_dotenv()
 
-# Configure page explicitly with accessibility in mind (clear title and layout)
 st.set_page_config(
     page_title="Poison Guard",
     page_icon="🛡️",
@@ -31,6 +29,7 @@ st.set_page_config(
 # 2. CONSTANTS & SYSTEM PROMPTS
 # ==========================================
 MODEL_NAME = 'gemini-2.5-flash'
+MAX_TEXT_LENGTH = 2000
 
 SYSTEM_PROMPT = """You are 'Poison Guard', a highly advanced AI system with two distinct personas:
 1. Emergency Mode (Poison Control Specialist): When the input describes a potential poisoning, immediate threat, or panic, act authoritatively. Identify the threat and prioritize first aid.
@@ -58,23 +57,17 @@ Do not provide any markdown formatting around the JSON, just output the raw JSON
 """
 
 # ==========================================
-# 3. CORE LOGIC (CACHED FOR EFFICIENCY)
+# 3. CORE LOGIC (CACHED & ASYNC)
 # ==========================================
 @st.cache_resource
 def init_gemini() -> Optional[genai.GenerativeModel]:
-    """
-    Initializes and caches the Gemini GenerativeModel instance.
-    This improves app efficiency by not rebuilding the model object on every run.
-    """
+    """Caches the Gemini GenerativeModel instance for efficient resource management."""
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.error("GEMINI_API_KEY environment variable is missing.")
         return None
     
-    # Configure the global genai library
     genai.configure(api_key=api_key)
-    
-    # Instantiate the model with structured output rules
     model = genai.GenerativeModel(
         MODEL_NAME, 
         system_instruction=SYSTEM_PROMPT,
@@ -82,38 +75,36 @@ def init_gemini() -> Optional[genai.GenerativeModel]:
     )
     return model
 
-def analyze_input(model: genai.GenerativeModel, image: Optional[Image.Image], text: str) -> Dict[str, Any]:
-    """
-    Sends the user text and/or image to the Gemini API and parses the JSON response.
-    
-    Args:
-        model: The initialized GenerativeModel.
-        image: A PIL Image object if provided by the user.
-        text: A string description provided by the user.
-        
-    Returns:
-        dict: The structured JSON response payload, or a dictionary containing an 'error' key.
-    """
+def validate_inputs(image: Optional[Image.Image], text: str) -> Optional[str]:
+    """Robust input validation to ensure scalability and prevent abuse."""
+    if not image and not text.strip():
+        return "No input provided. Please upload an image or type a description."
+    if len(text) > MAX_TEXT_LENGTH:
+        return f"Description is too long. Please limit to {MAX_TEXT_LENGTH} characters."
+    if image:
+        # Validate image format scalability
+        if image.format not in ['JPEG', 'PNG', 'JPG', 'WEBP', 'HEIC']:
+            logger.warning(f"Unsupported image format: {image.format}")
+            return "Unsupported image format. Please upload a JPG or PNG."
+    return None
+
+async def analyze_input_async(model: genai.GenerativeModel, image: Optional[Image.Image], text: str) -> Dict[str, Any]:
+    """Asynchronous operation to fetch analysis from Gemini API to sustain performance."""
     try:
-        if not image and not text.strip():
-            return {"error": "No input provided. Please upload an image or type a description."}
-            
         contents = []
         if text.strip():
             contents.append(text.strip())
         if image:
             contents.append(image)
             
-        logger.info(f"Sending analysis request to '{MODEL_NAME}'")
-        response = model.generate_content(contents)
+        logger.info(f"Sending async analysis request to '{MODEL_NAME}'")
+        # Async operation for better resource management
+        response = await model.generate_content_async(contents)
         
-        # Validating API actual text property exists to avoid unhandled exceptions
         if not hasattr(response, 'text') or not response.text:
-            logger.error("Empty response from API")
             return {"error": "The AI model returned an empty response."}
             
-        parsed_json = json.loads(response.text)
-        return parsed_json
+        return json.loads(response.text)
         
     except json.JSONDecodeError as de:
         logger.error(f"JSON Parsing Error: {de}")
@@ -126,47 +117,46 @@ def analyze_input(model: genai.GenerativeModel, image: Optional[Image.Image], te
         return {"error": "An unexpected server error occurred during analysis."}
 
 # ==========================================
-# 4. VIEW (UI RENDERING)
+# 4. VIEW (UI RENDERING & DEDUPLICATION)
 # ==========================================
+def render_list(title: str, items: list) -> None:
+    """Helper function to reduce duplicate code for rendering lists."""
+    if isinstance(items, list) and items:
+        st.write(f"**{title}**")
+        for item in items:
+            st.markdown(f"- {item}")
+    else:
+        st.write(f"**{title}** None provided. Monitor closely.")
+
 def render_ui():
     """Renders the Streamlit frontend layout."""
-    # Semantic Titles
     st.title("🛡️ Poison Guard")
     st.subheader("Your AI-Powered Home Safety Assistant")
     st.markdown("Instantly verify potential household hazards, plants, bites, or chemical spills. **Operates dynamically in Emergency or Educational modes.**")
 
-    # Layout for inputs
     col1, col2 = st.columns(2)
     with col1:
-        # Accessible label provided internally by Streamlit logic
-        uploaded_file = st.file_uploader(
-            "Upload an image (plant, bug, chemical...)", 
-            type=["jpg", "jpeg", "png"],
-            help="Upload a clear photo of the substance or item in question."
-        )
+        uploaded_file = st.file_uploader("Upload an image (plant, bug, chemical...)", type=["jpg", "jpeg", "png"])
     with col2:
-        text_input = st.text_area(
-            "Describe the item, exposure, or ask a question...", 
-            height=130,
-            help="Provide as much context as possible (e.g., 'Toddler drank a sip of cleaning fluid')"
-        )
+        text_input = st.text_area("Describe the item, exposure, or ask a question...", height=130)
 
-    # Submission Action
     if st.button("Analyze Threat", type="primary", use_container_width=True):
-        if not uploaded_file and not text_input.strip():
-            st.warning("Please upload an image or provide a description to proceed.")
+        image_obj = Image.open(uploaded_file) if uploaded_file else None
+        
+        # Validation
+        val_error = validate_inputs(image_obj, text_input)
+        if val_error:
+            st.warning(val_error)
             return
 
-        # Initialize the cached model
         model = init_gemini()
         if not model:
             st.error("API configuration error. Ensure the GEMINI_API_KEY is properly set in the server environment.")
             return
 
-        # Execute analysis efficiently with a spinner
         with st.spinner("Analyzing data with Poison Guard..."):
-            image_obj = Image.open(uploaded_file) if uploaded_file else None
-            result = analyze_input(model, image_obj, text_input)
+            # Execute async operation
+            result = asyncio.run(analyze_input_async(model, image_obj, text_input))
             
         render_results(result)
 
@@ -181,11 +171,9 @@ def render_results(result: Dict[str, Any]):
         return
 
     mode = result.get("mode", "EDUCATION")
-    
-    # --- Dynamic Styling based on Urgency ---
-    st.markdown("---")
     is_critical = mode == "EMERGENCY" or result.get("call_911") or result.get("urgency") in ["High", "Critical"]
     
+    st.markdown("---")
     if is_critical:
         st.error("🚨 CRITICAL ALERT 🚨")
         if result.get("call_911"):
@@ -193,7 +181,6 @@ def render_results(result: Dict[str, Any]):
     else:
         st.success(f"✅ Analysis Complete — **{mode} Mode Active**")
     
-    # --- Core Identification ---
     st.header(f"Identification: {result.get('identified_threat', 'Unknown')}")
     
     c1, c2 = st.columns(2)
@@ -202,40 +189,24 @@ def render_results(result: Dict[str, Any]):
     with c2:
         st.write(f"**Urgency:** {result.get('urgency', 'N/A')}")
     
-    # --- First Aid Steps ---
+    # Deduplicated list rendering
     st.subheader("First Aid & Immediate Steps")
-    first_aid = result.get("first_aid_steps", [])
-    if isinstance(first_aid, list) and first_aid:
-        for step in first_aid:
-            st.markdown(f"- {step}")
-    else:
-        st.write("No specific immediate steps provided. Monitor closely.")
+    render_list("Steps:", result.get("first_aid_steps", []))
     
     st.divider()
     
-    # --- Educational Safe Mode Display ---
     st.subheader("📚 Educational Information")
     edu_info = result.get("educational_info", {})
     if isinstance(edu_info, dict) and edu_info:
         st.write(f"**Common Names:** {edu_info.get('common_names', 'N/A')}")
-        st.write(f"**Toxicity Profile (Groups):** {edu_info.get('toxicity_to_groups', 'N/A')}")
+        st.write(f"**Toxicity Profile:** {edu_info.get('toxicity_to_groups', 'N/A')}")
         st.write(f"**Preventative Measures:** {edu_info.get('preventative_measures', 'N/A')}")
-        
-        symptoms = edu_info.get("symptoms_to_watch", [])
-        if isinstance(symptoms, list) and symptoms:
-            st.write("**Symptoms to Watch For:**")
-            for symp in symptoms:
-                st.markdown(f"- {symp}")
+        render_list("Symptoms to Watch For:", edu_info.get("symptoms_to_watch", []))
 
 # ==========================================
 # 5. ENTRY POINT
 # ==========================================
 if __name__ == "__main__":
     render_ui()
-    
     st.markdown("---")
-    st.warning(
-        "**DISCLAIMER:** This is an AI prototype acting as an informational assistant. "
-        "It does NOT replace professional medical advice. Always consult a medical professional or "
-        "contact your local Poison Control Center in case of actual poisoning."
-    )
+    st.warning("**DISCLAIMER:** This is an AI prototype acting as an informational assistant. It does NOT replace professional medical advice.")
