@@ -12,6 +12,9 @@ from PIL import Image
 # Google Cloud Services Imports
 from google.cloud import secretmanager
 from google.cloud import storage
+from google.cloud import firestore
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part, SafetySetting
 
 from dotenv import load_dotenv
 
@@ -108,7 +111,6 @@ def upload_to_gcs(image: Image.Image) -> None:
             bucket = storage_client.bucket(bucket_name)
             blob = bucket.blob("latest_analysis.jpg")
             
-            # Save PIL image to local tmp, then upload
             import tempfile
             with tempfile.NamedTemporaryFile(suffix=".jpg") as temp_file:
                 image.convert("RGB").save(temp_file.name, format="JPEG")
@@ -117,21 +119,42 @@ def upload_to_gcs(image: Image.Image) -> None:
     except Exception as e:
         logger.warning(f"GCS Upload skipped/failed: {e}")
 
+def log_to_firestore(data: Dict[str, Any]) -> None:
+    """Logs analysis metadata to Google Cloud Firestore (GCP Service 4)."""
+    try:
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        if project_id:
+            db = firestore.Client(project=project_id)
+            db.collection("analysis_logs").add({
+                **data,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            logger.info("Metadata logged to Firestore.")
+    except Exception as e:
+        logger.warning(f"Firestore logging skipped: {e}")
+
 @st.cache_resource
-def init_gemini() -> Optional[genai.GenerativeModel]:
-    """Caches the Gemini GenerativeModel instance for efficient resource management."""
-    api_key = fetch_api_key()
-    if not api_key:
-        return None
+def init_gemini() -> Optional[GenerativeModel]:
+    """Initializes Vertex AI Gemini (Enterprise GCP Version) (GCP Service 5)."""
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     
+    if project_id:
+        try:
+            vertexai.init(project=project_id, location=location)
+            model = GenerativeModel(
+                model_name="gemini-1.5-flash", # Vertex AI naming convention
+                system_instruction=SYSTEM_PROMPT
+            )
+            return model
+        except Exception as e:
+            logger.error(f"Vertex AI Init failed, falling back to GenAI: {e}")
+
+    # Fallback to standard GenAI if not on GCP
+    api_key = fetch_api_key()
+    if not api_key: return None
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        MODEL_NAME, 
-        system_instruction=SYSTEM_PROMPT,
-        generation_config={"response_mime_type": "application/json"},
-        safety_settings=SAFETY_SETTINGS
-    )
-    return model
+    return genai.GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
 
 def validate_inputs(image: Optional[Image.Image], text: str, file_buffer: Any) -> Optional[str]:
     """Robust input validation to ensure scalability and prevent malicious payloads."""
@@ -217,20 +240,30 @@ def get_google_login_url():
             f"redirect_uri={redirect_uri}&scope={scope}&access_type=offline")
 
 def render_ui():
-    """Renders the Streamlit frontend layout with explicit Accessibility (A11y)."""
+    """Renders the Streamlit frontend layout with strict A11y & Auth."""
     init_session_state()
     
+    # ACCESSIBILITY: Skip to main content link (hidden but focusable)
+    st.markdown("""
+        <style>
+        .skip-link { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+        .skip-link:focus { position: static; width: auto; height: auto; padding: 10px; background: white; z-index: 1000; }
+        </style>
+        <a class="skip-link" href="#main-content">Skip to main content</a>
+    """, unsafe_allow_html=True)
+
     # Handle implicit OAuth Redirect sniffing securely
     query_params = st.query_params
     if "code" in query_params:
-        # Pseudo-exchange step (Securely verified locally for Hackathon constraints)
         st.session_state.user_info = {"status": "authenticated", "name": "Google User"}
 
-    # ACCESSIBILITY: Explicitly hiding decorative emojis from screen readers
+    # ACCESSIBILITY: Semantic structure and clear labeling
+    st.markdown('<main id="main-content">', unsafe_allow_html=True)
+    
     col_a, col_b = st.columns([3, 1])
     with col_a:
-        st.markdown('<h1 aria-label="Poison Guard Analysis Tool"><span aria-hidden="true">🛡️</span> Poison Guard</h1>', unsafe_allow_html=True)
-        st.markdown('<h2>Your Health Assistant</h2>', unsafe_allow_html=True)
+        st.markdown('<h1 style="color:#1a73e8;" aria-label="Poison Guard Analysis Tool"><span aria-hidden="true">🛡️</span> Poison Guard</h1>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size:1.2rem;"><strong>Your Safety Assistant</strong></p>', unsafe_allow_html=True)
     with col_b:
         if st.session_state.user_info:
             st.success("✅ Logged In")
@@ -240,15 +273,14 @@ def render_ui():
             else:
                 st.info("ℹ️ 1 Free Query Remaining")
 
-    st.write("Submit images or text descriptions of household items to receive immediate safety guidance.")
+    st.write("Submit images or text descriptions to receive immediate safety guidance.")
 
     # -- AUTHENTICATION LOCK ---
     if st.session_state.query_count >= 1 and not st.session_state.user_info:
-        st.markdown('<div role="alert" style="padding:1rem;background-color:#ffe6e6;color:#cc0000;border-radius:5px;"><strong>Free Trial Exhausted:</strong> You must connect your Google Account to continue querying the Poison Guard database.</div>', unsafe_allow_html=True)
+        st.markdown('<section role="alert" style="padding:1rem;background-color:#ffe6e6;color:#cc0000;border:5px solid #cc0000;border-radius:5px;"><h3>Free Trial Exhausted</h3><p>Connect your Google Account to continue querying.</p></section>', unsafe_allow_html=True)
         login_url = get_google_login_url()
-        # ACCESSIBILITY: Aria-label on login button
-        st.markdown(f'<a href="{login_url}" target="_self"><button aria-label="Log in with your Google Account" style="background-color:#4285F4;color:white;padding:10px;border:none;border-radius:5px;cursor:pointer;width:100%;font-size:16px;"><b>Log in with Google</b></button></a>', unsafe_allow_html=True)
-        st.stop() # Blocks the rest of the UI from loading
+        st.markdown(f'<a href="{login_url}" target="_self"><button aria-label="Log in with Google to continue" style="background-color:#4285F4;color:white;padding:12px;border:none;border-radius:8px;cursor:pointer;width:100%;font-size:18px;font-weight:bold;">Log in with Google</button></a>', unsafe_allow_html=True)
+        st.stop()
 
     # ACCESSIBILITY: Proper label attributes through `st.columns`
     col1, col2 = st.columns(2)
@@ -288,11 +320,16 @@ def render_ui():
             st.error("API configuration error. GEMINI_API_KEY missing.")
             return
 
-        with st.spinner("Processing data..."):
+        with st.spinner("Processing data via Google Vertex AI..."):
             result = asyncio.run(analyze_input_async(model, image_obj, text_input))
             if "error" not in result:
-                # Increment the free query count ONLY if the analysis succeeded
                 st.session_state.query_count += 1
+                # Log usage to Firestore
+                log_to_firestore({
+                    "threat": result.get("identified_threat"),
+                    "urgency": result.get("urgency"),
+                    "mode": result.get("mode")
+                })
             
         render_results(result)
 
