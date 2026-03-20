@@ -165,12 +165,11 @@ def render_ui():
     
     # Handle implicit OAuth Redirect sniffing (checking URL params)
     query_params = st.query_params
-    if "code" in query_params and st.session_state.user_info is None:
+    if "code" in query_params:
         # In a real heavy app, we'd exchange this code for a token.
         # For this prototype hackathon flow, capturing the authorization redirect successfully proves GCP Identity integration!
+        # By NOT clearing the query param, we allow the URL to act as a persistent session across browser refreshes!
         st.session_state.user_info = {"status": "authenticated", "name": "Google User"}
-        st.success("Successfully logged in via Google Identity!")
-        st.query_params.clear()
 
     # Semantic Titles
     col_a, col_b = st.columns([3, 1])
