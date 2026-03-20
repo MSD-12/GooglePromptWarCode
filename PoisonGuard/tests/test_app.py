@@ -38,19 +38,19 @@ async def test_analyze_input_async_success(mock_async_model):
 
 def test_validate_inputs_empty():
     """Unit Test: Ensure scalability by blocking empty requests."""
-    error = validate_inputs(None, "")
+    error = validate_inputs(None, "", None)
     assert error is not None
-    assert "No input provided" in error
+    assert "Input required" in error
 
 def test_validate_inputs_unsupported_image():
     """Unit Test: Robust validation blocking unknown formats."""
-    error = validate_inputs(MockImage(format="TIFF"), "Check this out")
+    error = validate_inputs(MockImage(format="TIFF"), "Check this out", None)
     assert error is not None
     assert "Unsupported image format" in error
 
 def test_validate_inputs_length_limit():
     """Unit Test: Performance protection against massive text payloads."""
     long_text = "a" * 2005
-    error = validate_inputs(None, long_text)
+    error = validate_inputs(None, long_text, None)
     assert error is not None
     assert "too long" in error
